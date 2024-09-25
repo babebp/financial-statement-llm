@@ -5,10 +5,10 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 from langserve import add_routes
 
-from langchain_community.document_loaders import TextLoader, PyPDFLoader
+from langchain_community.document_loaders import PyPDFLoader
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
+from langchain_community.vectorstores import FAISS
 
 """
 NVIDIA annual report 2024 : https://s201.q4cdn.com/141608511/files/doc_financials/2024/ar/NVIDIA-2024-Annual-Report.pdf
@@ -18,12 +18,14 @@ NVIDIA annual report 2024 : https://s201.q4cdn.com/141608511/files/doc_financial
 raw_documents = PyPDFLoader("data/NVIDIA-2024-Annual-Report.pdf").load_and_split()
 
 # Chunk with RecursiveCharacterTextSplitter
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=60)
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=5120, chunk_overlap=200)
 documents = text_splitter.split_documents(raw_documents)
 
 # Embedding text into vector and store into vector database
 embedding_model = OpenAIEmbeddings()
-db = Chroma.from_documents(documents, embedding_model)
+
+db = FAISS.from_documents(documents=documents, 
+                           embedding=embedding_model)
 
 # Set type of retriever
 retriever = db.as_retriever()
@@ -53,8 +55,6 @@ chain = (
     | model
     | StrOutputParser()
 )
-
-
 
 # 4. App definition
 app = FastAPI(
