@@ -1,3 +1,6 @@
 venv
 .env
 data
+__pycache__
+.chainlit
+.files
