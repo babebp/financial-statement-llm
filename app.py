@@ -1,43 +1,56 @@
-from langchain_openai import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
-from langchain.schema import StrOutputParser
-from langchain.schema.runnable import Runnable
-from langchain.schema.runnable.config import RunnableConfig
-from typing import cast
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.vectorstores import FAISS
+from chainlit.types import ThreadDict
 import chainlit as cl
 import dotenv
-from chainlit.types import ThreadDict
+
 
 dotenv.load_dotenv()
+    
+model = ChatOpenAI()
 
-# @cl.set_starters
-# async def set_starters():
-#     return [
-#         cl.Starter(
-#             label="Morning routine ideation",
-#             message="Can you help me create a personalized morning routine that would help increase my productivity throughout the day? Start by asking me about my current habits and what activities energize me in the morning.",
-#             icon="/public/idea.svg",
-#             ),
+def create_chain(docs, model):
 
-#         cl.Starter(
-#             label="Explain superconductors",
-#             message="Explain superconductors like I'm five years old.",
-#             icon="/public/learn.svg",
-#             ),
-#         cl.Starter(
-#             label="Python script for daily email reports",
-#             message="Write a script to automate sending daily email reports in Python, and walk me through how I would set it up.",
-#             icon="/public/terminal.svg",
-#             ),
-#         cl.Starter(
-#             label="Text inviting friend to wedding",
-#             message="Write a text asking a friend to be my plus-one at a wedding next month. I want to keep it super short and casual, and offer an out.",
-#             icon="/public/write.svg",
-#             )
-#         ]
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=5120, chunk_overlap=200)
+    documents = text_splitter.split_documents(docs)
 
-from typing import Optional
-import chainlit as cl
+    # Embedding text into vector and store into vector database
+    embedding_model = OpenAIEmbeddings()
+
+    db = FAISS.from_documents(documents=documents, 
+                            embedding=embedding_model)
+
+    # Set type of retriever
+    retriever = db.as_retriever()
+    
+    template = """Answer the question based on the following context only:
+
+    {context}
+
+    Question: {question}
+    """
+    
+    prompt = ChatPromptTemplate.from_template(template)
+
+
+    def format_docs(docs):
+        return "\n\n".join([d.page_content for d in docs])
+
+
+    chain = (
+        {"context": retriever | format_docs, "question": RunnablePassthrough()}
+        | prompt
+        | model
+        | StrOutputParser()
+    )
+        
+    return chain
+
 
 @cl.set_chat_profiles
 async def set_profile():
@@ -48,6 +61,7 @@ async def set_profile():
             icon="/public/avatar.png"  # Replace with the actual path to your image
         )
     ]
+    
     
 @cl.password_auth_callback
 def auth_callback(username: str, password: str):
@@ -67,36 +81,24 @@ def auth_callback(username: str, password: str):
     
 
 @cl.on_chat_start
-async def on_chat_start():
-    model = ChatOpenAI(streaming=True)
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                "You're a very knowledgeable historian who provides accurate and eloquent answers to historical questions.",
-            ),
-            ("human", "{question}"),
-        ]
-    )
-    runnable = prompt | model | StrOutputParser()
-    cl.user_session.set("runnable", runnable)
+async def on_chat_start():    
+    file = await cl.AskFileMessage(
+        content="Please upload a python file to begin!", accept=["application/pdf"]
+      ).send()
+    
+    docs = PyPDFLoader(file[0].path).load_and_split()
+    chain = create_chain(docs, model)
+    
+    cl.user_session.set("runnable", chain)
+    
 
 @cl.on_chat_resume
 async def on_chat_resume(thread: ThreadDict):
     print("The user resumed a previous chat session!")
     
+    
 @cl.on_message
 async def on_message(message: cl.Message):
-    runnable = cast(Runnable, cl.user_session.get("runnable"))  # type: Runnable
-
-    msg = cl.Message(content="")
-
-    print(cl.chat_context.to_openai())
-    
-    async for chunk in runnable.astream(
-        {"question": message.content},
-        config=RunnableConfig(callbacks=[cl.LangchainCallbackHandler()]),
-    ):
-        await msg.stream_token(chunk)
-
-    await msg.send()
+    rag_chain = cl.user_session.get("runnable")
+    res = rag_chain.invoke(message.content)
+    await cl.Message(content=res).send()
