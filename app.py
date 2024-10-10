@@ -8,11 +8,12 @@ from langchain_community.vectorstores import FAISS
 from chainlit.types import ThreadDict
 import chainlit as cl
 import dotenv
-
+from langchain.schema.runnable.config import RunnableConfig
+from langchain.chains import conversational_retrieval
 
 dotenv.load_dotenv()
     
-model = ChatOpenAI()
+model = ChatOpenAI(model='gpt-4o-mini', streaming=True)
 
 def create_chain(docs, model):
 
@@ -49,7 +50,7 @@ def create_chain(docs, model):
         | StrOutputParser()
     )
         
-    return chain
+    cl.user_session.set("runnable", chain)
 
 
 @cl.set_chat_profiles
@@ -83,13 +84,15 @@ def auth_callback(username: str, password: str):
 @cl.on_chat_start
 async def on_chat_start():    
     file = await cl.AskFileMessage(
-        content="Please upload a python file to begin!", accept=["application/pdf"]
+        content="Please upload a PDF file to begin!", accept=["application/pdf"]
       ).send()
     
-    docs = PyPDFLoader(file[0].path).load_and_split()
-    chain = create_chain(docs, model)
+    msg = cl.Message(content=f"Processing `{file[0].name}`...")
+    await msg.send()
     
-    cl.user_session.set("runnable", chain)
+    docs = PyPDFLoader(file[0].path).load_and_split()
+    create_chain(docs, model)
+
     
 
 @cl.on_chat_resume
@@ -99,6 +102,16 @@ async def on_chat_resume(thread: ThreadDict):
     
 @cl.on_message
 async def on_message(message: cl.Message):
-    rag_chain = cl.user_session.get("runnable")
-    res = rag_chain.invoke(message.content)
-    await cl.Message(content=res).send()
+    # memory = cl.user_session.get("memory")  # type: ConversationBufferMemory
+
+    runnable = cl.user_session.get("runnable")
+
+    res = cl.Message(content="")
+
+    async for chunk in runnable.astream(message.content):
+        await res.stream_token(chunk)
+
+    await res.send()
+
+    # memory.chat_memory.add_user_message(message.content)
+    # memory.chat_memory.add_ai_message(res.content)
